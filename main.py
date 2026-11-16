@@ -60,6 +60,10 @@ class LoginModel(BaseModel):
     password: str
     id_dispositivo: str
 
+class LoginAdminModel(BaseModel):
+    usuario: str
+    password: str
+
 class ValidacionAccesoModel(BaseModel):
     codigo_leido: str
     metodo_validacion: str = "QR"  # "QR" o "NFC"
@@ -78,7 +82,6 @@ def registrar_usuario(datos: RegistroModel):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # Inserción en Titulares
         query_titular = """
             INSERT INTO virtual.titulares (
                 nombre, apellido_paterno, apellido_materno, 
@@ -97,7 +100,6 @@ def registrar_usuario(datos: RegistroModel):
 
         identificador_qr = ""
 
-        # Inserción en subclase correspondiente
         if datos.tipo_usuario == 'Estudiante':
             query_est = """
                 INSERT INTO virtual.estudiantes (id_titular, numero_control, carrera, especialidad, semestre) 
@@ -120,7 +122,6 @@ def registrar_usuario(datos: RegistroModel):
             ))
             identificador_qr = datos.numero_empleado.strip()
 
-        # Creación automática de la credencial activa vinculada al QR
         if identificador_qr:
             uid_nfc_generado = f"NFC-{uuid.uuid4().hex[:12].upper()}"
             fecha_vencimiento = datetime.now() + timedelta(days=365)
@@ -141,7 +142,7 @@ def registrar_usuario(datos: RegistroModel):
         cursor.close()
         conn.close()
 
-# 2. INICIO DE SESIÓN CON BLOQUEO DE DISPOSITIVO ÚNICO
+# 2. INICIO DE SESIÓN CON BLOQUEO DE DISPOSITIVO ÚNICO (ALUMNOS / PROFESORES)
 @app.post("/api/login")
 def login_usuario(cred: LoginModel):
     conn = get_db_connection()
@@ -161,7 +162,6 @@ def login_usuario(cred: LoginModel):
         if not usuario:
             raise HTTPException(status_code=401, detail="Credenciales incorrectas")
 
-        # Validación estricta: solo el teléfono vinculado puede abrir la cuenta
         if usuario["id_dispositivo"] != cred.id_dispositivo:
             raise HTTPException(
                 status_code=403,
@@ -177,7 +177,36 @@ def login_usuario(cred: LoginModel):
         cursor.close()
         conn.close()
 
-# 3. CONSULTA DE DATOS DE CREDENCIAL (Con verificación opcional de dispositivo)
+# 3. INICIO DE SESIÓN PARA PERSONAL DE RECEPCIÓN / CASETA
+@app.post("/api/login-admin")
+def login_administrativo(cred: LoginAdminModel):
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        query = """
+            SELECT id_admin, nombre_completo, usuario, rol
+            FROM virtual.usuarios_administrativos
+            WHERE usuario = %s AND password_hash = %s AND activo = TRUE
+        """
+        cursor.execute(query, (cred.usuario.strip(), cred.password.strip()))
+        admin = cursor.fetchone()
+
+        if not admin:
+            raise HTTPException(
+                status_code=401, 
+                detail="Credenciales de recepción incorrectas o usuario inactivo"
+            )
+
+        return admin
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+# 4. CONSULTA DE DATOS DE CREDENCIAL (Con verificación de dispositivo)
 @app.get("/api/buscar/{identificador}")
 def buscar_usuario(identificador: str, x_device_id: Optional[str] = Header(default=None)):
     conn = get_db_connection()
@@ -201,7 +230,6 @@ def buscar_usuario(identificador: str, x_device_id: Optional[str] = Header(defau
         if not usuario:
             raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-        # Si la app envía el encabezado X-Device-Id, verificamos que siga siendo el equipo autorizado
         if x_device_id and usuario["id_dispositivo"] != x_device_id:
             raise HTTPException(
                 status_code=403,
@@ -217,7 +245,7 @@ def buscar_usuario(identificador: str, x_device_id: Optional[str] = Header(defau
         cursor.close()
         conn.close()
 
-# 4. VALIDACIÓN DE ACCESO PARA ESCÁNER FÍSICO QR / NFC (ZNEMAZ X7-1000A)
+# 5. VALIDACIÓN DE ACCESO PARA ESCÁNER FÍSICO QR / NFC (ZNEMAZ X7-1000A)
 @app.post("/api/validar-acceso")
 def validar_acceso(datos: ValidacionAccesoModel):
     conn = get_db_connection()
@@ -226,7 +254,7 @@ def validar_acceso(datos: ValidacionAccesoModel):
     metodo = datos.metodo_validacion.upper() if datos.metodo_validacion.upper() in ["QR", "NFC"] else "QR"
 
     try:
-        # Caso A: Verificar si es un Pase Temporal de Invitado (ej. INV-XXXXX)
+        # Caso A: Pase Temporal de Invitado (ej. INV-XXXXX)
         if codigo.upper().startswith("INV-"):
             cursor.execute("""
                 SELECT id_invitado, folio_qr, nombre_completo, area_destino, fecha_expiracion, estado
@@ -261,7 +289,7 @@ def validar_acceso(datos: ValidacionAccesoModel):
                 "detalle": f"Destino: {invitado['area_destino']}"
             }
 
-        # Caso B: Buscar credencial institucional (Estudiante o Profesor)
+        # Caso B: Credencial institucional (Estudiante o Profesor)
         query_cred = """
             SELECT c.id_credencial, c.estado, c.fecha_vencimiento,
                    t.nombre, t.apellido_paterno, t.apellido_materno, t.tipo_usuario,
@@ -292,7 +320,6 @@ def validar_acceso(datos: ValidacionAccesoModel):
             else f"Depto: {registro['departamento_academico']}"
         )
 
-        # Evaluar vigencia y estado
         es_valida = (
             registro["estado"] == "Activa"
             and registro["fecha_vencimiento"] >= datetime.now()
@@ -304,7 +331,6 @@ def validar_acceso(datos: ValidacionAccesoModel):
             else f"Credencial {registro['estado']} o vencida"
         )
 
-        # Guardar bitácora en registros_acceso
         cursor.execute("""
             INSERT INTO virtual.registros_acceso (id_credencial, metodo_validacion, resultado)
             VALUES (%s, %s, %s)
