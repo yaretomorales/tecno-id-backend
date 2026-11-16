@@ -184,9 +184,9 @@ def login_administrativo(cred: LoginAdminModel):
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
         query = """
-            SELECT id_admin, nombre_completo, usuario, rol
+            SELECT id_usuario, nombre_usuario, rol
             FROM virtual.usuarios_administrativos
-            WHERE usuario = %s AND password_hash = %s AND activo = TRUE
+            WHERE nombre_usuario = %s AND credenciales_acceso = %s
         """
         cursor.execute(query, (cred.usuario.strip(), cred.password.strip()))
         admin = cursor.fetchone()
@@ -194,7 +194,7 @@ def login_administrativo(cred: LoginAdminModel):
         if not admin:
             raise HTTPException(
                 status_code=401, 
-                detail="Credenciales de recepción incorrectas o usuario inactivo"
+                detail="Credenciales de recepción incorrectas"
             )
 
         return admin
